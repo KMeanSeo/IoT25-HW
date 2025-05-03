@@ -13,13 +13,13 @@ All codes and examples were tested and run on a Linux environment with Ubuntu 22
 
 ## Folder List
 
-- [PHW1](./PHW1/README.md)  
+- [HW01](./HW01/README.md)  
   _Installing ESP32 in Arduino IDE 2.0_
 
-- [PHW2](./PHW2/README.md)  
+- [HW02](./HW02/README.md)  
   _Basic Sensor and Actuator Control with ESP32_
 
-- [PHW3](./PHW3/README.md)  
+- [HW03](./HW03/README.md)  
   _Read Ananlog Values with Arduino IDE_
 
 ---
