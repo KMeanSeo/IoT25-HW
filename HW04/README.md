@@ -22,7 +22,7 @@ On this Exercise we use the Android app "Serial Bluetooth Terminal" available in
 ### 1. Code
 
 ESP32 Bluetooth Classic with Arduino IDE code.<br>
-Code for paring & Data exchange between ESP32 and Mobile Phone(use `Serial Bluetooth Terminal`) .
+Code for paring & Data exchange between ESP32 and Mobile Phone(use `Serial Bluetooth Terminal`).
 
 Also find the code in this repository: [`PHW4.ino`](./PHW4.ino)
 
@@ -68,12 +68,14 @@ void loop() {
 ### 2. Image
 
 Screenshot of Arduino IDE showing the selected ESP32 board and port.
+![Arduino IDE showing selected ESP32 board and port](./result/HW4_result.png)
 
 ---
 
 ### 3. Video or Photo
 
-Video shows Read Analog Values with Arduino IDE by the blinking LED based on potentiometer value.
+Image shows connect ESP32 and Mobile Phone via Bluetooth Classic<br>
+Shows paring & Data exchange between ESP32 and Mobile Phone(use `Serial Bluetooth Terminal`).
 
 - Initial setup finished, Red to pair with Bluetooth
   ![Read Analog Values with Arduino IDE code](./result/HW4_result0.png)
@@ -89,6 +91,6 @@ Video shows Read Analog Values with Arduino IDE by the blinking LED based on pot
 - Send "Have a nice day!" to Mobile Phone
   ![Read Analog Values with Arduino IDE code](./result/HW4_result4.png)
 - Receive "Have a nice day!" on ESP32
-  ![Read Analog Values with Arduino IDE code](./result/HW4_result5.png)
+  ![Read Analog Values with Arduino IDE code](./result/HW4_result5.jpg)
 
 ---
