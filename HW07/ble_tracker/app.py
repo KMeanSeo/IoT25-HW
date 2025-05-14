@@ -1,111 +1,175 @@
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, jsonify, send_from_directory, request
 from flask_sse import sse
 import math
-import requests
+import asyncio
 import threading
+from bleak import BleakClient, BleakGATTCharacteristic
+import struct
+import time
 
 app = Flask(__name__)
 app.config["REDIS_URL"] = "redis://localhost"
 app.register_blueprint(sse, url_prefix='/stream')
 
-# 하드웨어 설정
-ESP32_SERVER_IP = "192.168.0.50"  # ESP32 서버 IP 주소
-LED_ENDPOINT = f"http://{ESP32_SERVER_IP}/set_led"
+# BLE Configuration
+SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+LED_SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+LED_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
-# 전역 변수
-devices = {}          # 실시간 위치 데이터
-calibration_data = {} # 교정 데이터
-THRESHOLD = 1.0       # 거리 임계값 (미터)
+# Hardware configuration
+THRESHOLD = 1.0  # Distance threshold in meters
+ESP32_MAC_ADDRESSES = ["5c:01:3b:33:04:0a"]  # Verify MAC address
+devices = {}      # Real-time position data
+calibration_data = {}
 
-def calculate_distance(c1, c2):
-    """두 클라이언트 간 유클리드 거리 계산"""
-    dx = devices[c1]['x'] - devices[c2]['x']
-    dy = devices[c1]['y'] - devices[c2]['y']
-    return math.sqrt(dx**2 + dy**2)
+async def handle_notification(sender: BleakGATTCharacteristic, data: bytearray):
+    """Enhanced data processing handler"""
+    try:
+        decoded = data.decode('utf-8').strip()
+        if ',' not in decoded:
+            return
+            
+        rssi_str, tx_power_str = decoded.split(',', 1)
+        client_id = f"client{sender.handle}"
+        rssi = int(rssi_str)
+        tx_power = int(tx_power_str)
+
+        # Distance calculation (assuming n=2.0)
+        distance = 10 ** ((tx_power - rssi) / 20)
+        angle = hash(client_id) % 360
+        
+        devices[client_id] = {
+            'x': distance * math.cos(math.radians(angle)),
+            'y': distance * math.sin(math.radians(angle)),
+            'distance': distance
+        }
+
+        # SSE update
+        sse.publish({
+            "client_id": client_id,
+            "x": round(devices[client_id]['x'], 2),
+            "y": round(devices[client_id]['y'], 2),
+            "distance": round(distance, 2)
+        }, type='position')
+
+    except Exception as e:
+        print(f"Data processing error: {str(e)}")
+
+class BLEManager:
+    def __init__(self):
+        self.connected_devices = {}
+        
+    async def connect_device(self, address):
+        """Enhanced connection handling logic"""
+        print(f"Attempting to connect to {address}...")
+        client = BleakClient(address, timeout=20.0)
+        try:
+            if not await client.connect():
+                raise Exception("Connection failed")
+            
+            # Wait for service discovery
+            await asyncio.sleep(2.0)
+            
+            if not client.is_connected:
+                raise Exception("Connection lost after initialization")
+            
+            service = client.services.get_service(SERVICE_UUID)
+            if not service:
+                raise Exception(f"Service {SERVICE_UUID} not found")
+                
+            char = service.get_characteristic(CHARACTERISTIC_UUID)
+            if not char:
+                raise Exception(f"Characteristic {CHARACTERISTIC_UUID} not found")
+            
+            await client.start_notify(char.uuid, handle_notification)
+            self.connected_devices[address] = client
+            print(f"✅ {address} connected successfully")
+            return True
+            
+        except Exception as e:
+            print(f"🔴 {address} connection failed: {str(e)}")
+            await client.disconnect()
+            return False
+
+async def run_ble_clients():
+    """Enhanced BLE client runner"""
+    manager = BLEManager()
+    while True:
+        tasks = [manager.connect_device(addr) for addr in ESP32_MAC_ADDRESSES]
+        await asyncio.gather(*tasks)
+        await asyncio.sleep(5.0)  # Reconnection interval
+
+def start_ble_clients():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run_ble_clients())
+
+async def send_led_command(r, g, b):
+    """Enhanced LED control function"""
+    try:
+        async with BleakClient(ESP32_MAC_ADDRESSES[0], timeout=10.0) as client:
+            await asyncio.sleep(0.5)  # Wait for service discovery
+            service = client.services.get_service(LED_SERVICE_UUID)
+            if not service:
+                raise Exception("LED service not found")
+                
+            char = service.get_characteristic(LED_CHAR_UUID)
+            if not char:
+                raise Exception("LED characteristic not found")
+            
+            data = f"{r},{g},{b}"
+            await client.write_gatt_char(char.uuid, data.encode())
+            print(f"LED set successfully: {data}")
+    except Exception as e:
+        print(f"LED control failed: {str(e)}")
 
 def control_led():
-    """1초 간격으로 거리 체크 및 LED 제어"""
+    """Enhanced LED control logic"""
     while True:
-        led = {'r':0, 'g':0, 'b':0}
-        active_pairs = []
-        
-        # 가능한 모든 클라이언트 조합
-        pairs = [
-            ('client1', 'client2'),
-            ('client2', 'client3'), 
-            ('client1', 'client3')
-        ]
-        
-        # 각 조합 거리 측정
-        for pair in pairs:
-            c1, c2 = pair
-            if c1 in devices and c2 in devices:
-                distance = calculate_distance(c1, c2)
-                if distance < THRESHOLD:
-                    active_pairs.append(pair)
-        
-        # LED 컬러 결정
-        if ('client1', 'client2') in active_pairs:
-            led['r'] = 255
-        if ('client2', 'client3') in active_pairs:
-            led['g'] = 255
-        if ('client1', 'client3') in active_pairs:
-            led['b'] = 255
-        if len(active_pairs) == 3:
-            led = {'r':255, 'g':255, 'b':255}
-        
-        # ESP32에 LED 명령 전송
         try:
-            requests.post(LED_ENDPOINT, json=led, timeout=1)
-        except Exception as e:
-            print("LED control failed:", e)
-        
-        threading.Event().wait(1)
+            led = {'r':0, 'g':0, 'b':0}
+            active_pairs = []
+            pairs = [
+                ('client1', 'client2', 'r'),
+                ('client2', 'client3', 'g'),
+                ('client1', 'client3', 'b')
+            ]
+            
+            for c1, c2, color in pairs:
+                if c1 in devices and c2 in devices:
+                    distance = math.sqrt(
+                        (devices[c1]['x']-devices[c2]['x'])**2 +
+                        (devices[c1]['y']-devices[c2]['y'])**2
+                    )
+                    if distance < THRESHOLD:
+                        led[color] = 255
+                        active_pairs.append((c1, c2))
 
-# 백그라운드 스레드 시작
-threading.Thread(target=control_led, daemon=True).start()
+            if len(active_pairs) == 3:
+                led = {'r':255, 'g':255, 'b':255}
+
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(send_led_command(led['r'], led['g'], led['b']))
+            
+        except Exception as e:
+            print(f"LED control error: {str(e)}")
+        
+        time.sleep(1)
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
-@app.route('/update', methods=['POST'])
-def update_data():
-    data = request.json
-    client_id = data['client_id']
-    rssi = data['rssi']
-    tx_power = data['tx_power']
-    
-    # 거리 계산 (n=2.0 가정)
-    distance = 10 ** ((tx_power - rssi) / 20)
-    angle = hash(client_id) % 360  # 장치별 고유 각도
-    
-    # 좌표 저장
-    devices[client_id] = {
-        'x': distance * math.cos(math.radians(angle)),
-        'y': distance * math.sin(math.radians(angle)),
-        'distance': distance
-    }
-    
-    # 실시간 업데이트 전송
-    sse.publish({
-        "client_id": client_id,
-        "x": devices[client_id]['x'],
-        "y": devices[client_id]['y'],
-        "distance": distance
-    }, type='position')
-    
-    return jsonify({"status": "success"})
-
 @app.route('/calibrate', methods=['POST'])
 def calibrate():
-    data = request.json
     try:
+        data = request.json
         client_id = data['client_id']
         actual_dist = float(data['actual_dist'])
         
         if actual_dist <= 0:
-            return jsonify({"error": "Distance must be positive"}), 400
+            return jsonify({"error": "Value must be greater than 0"}), 400
             
         measured_dist = devices[client_id]['distance']
         error = ((measured_dist - actual_dist) / actual_dist) * 100
@@ -129,4 +193,10 @@ def serve_js(filename):
     return send_from_directory('static/js', filename)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    ble_thread = threading.Thread(target=start_ble_clients, daemon=True)
+    ble_thread.start()
+    
+    led_thread = threading.Thread(target=control_led, daemon=True)
+    led_thread.start()
+    
+    app.run(host='0.0.0.0', port=5000, use_reloader=False)

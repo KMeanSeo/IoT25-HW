@@ -1,71 +1,72 @@
-// #include <BLEDevice.h>
-// #include <WiFi.h>
-// #include <HTTPClient.h>
-
-// // 서버 및 다른 클라이언트 검색
-// void scanDevices() {
-//   BLEScanResults results = BLEDevice::getScan()->start(5);
-  
-//   for(int i=0; i<results.getCount(); i++){
-//     BLEAdvertisedDevice device = results.getDevice(i);
-//     String devName = device.getName().c_str();
-    
-//     if(devName.startsWith("Anchor") || devName.startsWith("Node")){
-//       float distance = calcDistance(device.getRSSI(), device.getTXPower());
-//       sendToPi(devName, distance);
-//     }
-//   }
-// }
-
-// // 거리 계산 함수
-// float calcDistance(int rssi, int txPower) {
-//   const float n = 2.3;
-//   return pow(10, (txPower - rssi)/(10 * n));
-// }
-
-// // 데이터 전송
-// void sendToPi(String target, float dist) {
-//   String json = "{\"from\":\"" + String(ESP.getEfuseMac()) 
-//               + "\",\"to\":\"" + target 
-//               + "\",\"distance\":" + String(dist,2) + "}";
-  
-//   HTTPClient http;
-//   http.begin("http://라즈베리파이_IP:5000/update");
-//   http.addHeader("Content-Type", "application/json");
-//   http.POST(json);
-//   http.end();
-// }
-
-
-#include <WiFi.h>
-#include <HTTPClient.h>
 #include <BLEDevice.h>
+#include <BLEScan.h>
 
-const char* ssid = "your_wifi";
-const char* password = "your_password";
-const char* serverURL = "http://라즈베리파이_IP:5000/update";
+// Function prototypes
+void sendToPi(int rssi, int txPower);
 
-void sendData(float rssi, int txPower) {
-    HTTPClient http;
-    http.begin(serverURL);
-    http.addHeader("Content-Type", "application/json");
-    
-    String json = "{";
-    json += "\"client_id\":\"" + String(ESP.getEfuseMac()) + "\",";
-    json += "\"rssi\":" + String(rssi) + ",";
-    json += "\"tx_power\":" + String(txPower);
-    json += "}";
-    
-    http.POST(json);
-    http.end();
+// Raspberry Pi BLE Info
+BLEAddress piAddress("2C:CF:67:31:CE:5B"); // Change to actual Raspberry Pi BLE MAC address
+BLEClient* piClient;
+BLERemoteCharacteristic* dataChar;
+
+// UUID Definitions
+#define PI_SERVICE_UUID    BLEUUID("0000ffff-0000-1000-8000-00805f9b34fb")
+#define PI_CHAR_UUID       BLEUUID("0000ff01-0000-1000-8000-00805f9b34fb")
+#define SERVER_SERVICE_UUID BLEUUID("4fafc201-1fb5-459e-8fcc-c5c9c331914b") // ESP32 Server Service UUID
+
+void connectToPi() {
+  if (piClient->isConnected()) return;
+  if (!piClient->connect(piAddress)) {
+    Serial.println("Failed to connect to Raspberry Pi BLE server");
+    return;
+  }
+  BLERemoteService* piService = piClient->getService(PI_SERVICE_UUID);
+  if (piService) {
+    dataChar = piService->getCharacteristic(PI_CHAR_UUID);
+    Serial.println("Successfully connected to Raspberry Pi BLE server");
+  } else {
+    Serial.println("Failed to find Raspberry Pi BLE service");
+  }
+}
+
+void sendToPi(int rssi, int txPower) {
+  connectToPi();
+  if (!dataChar || !dataChar->canWrite()) {
+    Serial.println("Cannot write to Raspberry Pi characteristic");
+    return;
+  }
+  char buffer[20];
+  snprintf(buffer, sizeof(buffer), "%d,%d", rssi, txPower);
+  dataChar->writeValue(buffer);
+  Serial.printf("Data sent to Raspberry Pi: %s\n", buffer);
+}
+
+void scanDevices() {
+  BLEScan* scanner = BLEDevice::getScan();
+  scanner->setActiveScan(true);
+  scanner->setInterval(100);
+  scanner->setWindow(99);
+
+  BLEScanResults* results = scanner->start(3); // 3-second scan
+  for (int i = 0; i < results->getCount(); i++) {
+    BLEAdvertisedDevice device = results->getDevice(i);
+    if (device.haveServiceUUID() && device.getServiceUUID().equals(SERVER_SERVICE_UUID)) {
+      int rssi = device.getRSSI();
+      int txPower = device.getTXPower();
+      Serial.printf("[Server Found] RSSI: %d dBm, TX Power: %d dBm\n", rssi, txPower);
+      sendToPi(rssi, txPower);
+    }
+  }
+  scanner->clearResults();
 }
 
 void setup() {
-    // WiFi 및 BLE 초기화 코드
+  Serial.begin(115200);
+  BLEDevice::init("BLE-Client");
+  piClient = BLEDevice::createClient();
 }
 
 void loop() {
-    // BLE 스캔 및 RSSI 측정 코드
-    sendData(measured_rssi, tx_power);
-    delay(2000);
+  scanDevices();
+  delay(5000); // Scan every 5 seconds
 }
