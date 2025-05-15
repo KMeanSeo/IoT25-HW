@@ -49,32 +49,21 @@ class EnhancedAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
     }
   }
 
-  float calculateDistance(int rssi, int txPower) {
-      // RSSI -63 ~ -76 범위에서 txPower 9dBm일 때 110cm가 나오도록 보정
-      const float N = 2.0;  // 기본 경로 손실 지수 유지
-      
-      // 보정 계수 적용 (RSSI 범위에 맞게 조정)
-      float distance = pow(10, (txPower - rssi) / (10 * N));
-      
-      // 보정 상수 적용 (110cm에 맞게 조정)
-      float calibrationFactor = 0.0;
-      
-      // RSSI 값에 따른 보정 계수 계산
-      if (rssi >= -76 && rssi <= -63) {
-          // 선형 보정: 110cm가 나오도록 조정
-          float rawDistance = distance;
-          distance = 1.1;  // 항상 110cm (1.1m)가 되도록 설정
-      } else {
-          // RSSI 범위 밖일 경우 기존 공식 사용하되 보정 계수 적용
-          // 보정 계수는 -70dBm에서 110cm가 나오도록 계산
-          float referenceRssi = -70;  // 범위 중간값
-          float referenceDistance = pow(10, (txPower - referenceRssi) / (10 * N));
-          calibrationFactor = 1.1 / referenceDistance;
-          distance *= calibrationFactor;
-      }
-      
-      return distance;
-  }
+    float calculateDistance(int rssi, int txPower) {
+        const float N = 2.0;
+        float targetDistance = 1.1; // Target distance at reference RSSI
+        int refRssiLow = -76;
+        int refRssiHigh = -63;
+        int referenceRssi = (refRssiLow + refRssiHigh) / 2;
+
+        float rawDistance = pow(10, (txPower - rssi) / (10 * N));
+        float referenceDistance = pow(10, (txPower - referenceRssi) / (10 * N));
+        float calibrationFactor = targetDistance / referenceDistance;
+        float calibratedDistance = rawDistance * calibrationFactor;
+
+        return calibratedDistance;
+    }
+
 
 //   float calculateDistance(int rssi, int txPower) {
 //       // RSSI -63 ~ -76 범위에서 txPower 9dBm일 때 110cm가 나오도록 보정
