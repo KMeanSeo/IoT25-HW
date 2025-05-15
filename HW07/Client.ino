@@ -5,11 +5,17 @@
 
 // ========== 사용자 설정 ========== //
 #define TARGET_MAC_ADDRESS "5c:01:3b:33:04:0a"  // 여기에 타겟 MAC 주소 입력
+#define RSSI_SAMPLE_COUNT 15  // 평균을 내기 위한 RSSI 샘플 수
 // ================================= //
 
 BLEScan* pBLEScan;
 BLEAddress* targetAddress;
 bool deviceFound = false;
+
+// RSSI 샘플을 저장할 배열과 관련 변수들
+int rssiSamples[RSSI_SAMPLE_COUNT];
+int rssiSampleIndex = 0;
+bool rssiArrayFilled = false;
 
 class EnhancedAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) {
@@ -21,8 +27,18 @@ class EnhancedAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
       int rssi = 0;
       if (advertisedDevice.haveRSSI()) {
         rssi = advertisedDevice.getRSSI();
+        
+        // RSSI 값을 배열에 저장
+        rssiSamples[rssiSampleIndex] = rssi;
+        rssiSampleIndex = (rssiSampleIndex + 1) % RSSI_SAMPLE_COUNT;
+        
+        // 배열이 완전히 채워졌는지 확인
+        if (rssiSampleIndex == 0) {
+          rssiArrayFilled = true;
+        }
       } else {
         Serial.println("⚠️ RSSI 정보 없음");
+        return;
       }
 
       // TX Power 값 확인
@@ -40,40 +56,54 @@ class EnhancedAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
       Serial.print(txPower);
       Serial.println(" dBm");
       
-      // 거리 계산 (선택 사항)
-      float distance = calculateDistance(rssi, txPower);
-      Serial.print("추정 거리: ");
-      Serial.print(distance);
-      Serial.println(" m");
-      Serial.println("------------------------");
+      // 충분한 샘플이 모였을 때만 평균 RSSI 계산 및 거리 추정
+      if (rssiArrayFilled || rssiSampleIndex >= 5) {  // 최소 5개 이상의 샘플이 있을 때
+        // 평균 RSSI 계산
+        float avgRssi = calculateAverageRssi();
+        
+        // 거리 계산
+        float distance = calculateDistance(avgRssi, txPower);
+        
+        Serial.print("평균 RSSI: ");
+        Serial.print(avgRssi);
+        Serial.print(" dBm | 추정 거리: ");
+        Serial.print(distance);
+        Serial.println(" m");
+        Serial.println("------------------------");
+      } else {
+        Serial.print("RSSI 샘플 수집 중: ");
+        Serial.print(rssiSampleIndex);
+        Serial.print("/");
+        Serial.println(RSSI_SAMPLE_COUNT);
+      }
     }
   }
 
-    float calculateDistance(int rssi, int txPower) {
-        const float N = 2.0;
-        float targetDistance = 1.1; // Target distance at reference RSSI
-        int refRssiLow = -76;
-        int refRssiHigh = -63;
-        int referenceRssi = (refRssiLow + refRssiHigh) / 2;
-
-        float rawDistance = pow(10, (txPower - rssi) / (10 * N));
-        float referenceDistance = pow(10, (txPower - referenceRssi) / (10 * N));
-        float calibrationFactor = targetDistance / referenceDistance;
-        float calibratedDistance = rawDistance * calibrationFactor;
-
-        return calibratedDistance;
+  float calculateAverageRssi() {
+    int sum = 0;
+    int count = rssiArrayFilled ? RSSI_SAMPLE_COUNT : rssiSampleIndex;
+    
+    for (int i = 0; i < count; i++) {
+      sum += rssiSamples[i];
     }
+    
+    return (float)sum / count;
+  }
 
+  float calculateDistance(float rssi, int txPower) {
+    const float N = 2.0;
+    float targetDistance = 1.1; // Target distance at reference RSSI
+    int refRssiLow = -76;
+    int refRssiHigh = -63;
+    int referenceRssi = (refRssiLow + refRssiHigh) / 2;
 
-//   float calculateDistance(int rssi, int txPower) {
-//       // RSSI -63 ~ -76 범위에서 txPower 9dBm일 때 110cm가 나오도록 보정
-//       const float N = 4.0;  // 보정된 경로 손실 지수
-//       const float calibrationFactor = 0.37;  // 보정 계수
-      
-//       float distance = calibrationFactor * pow(10, (txPower - rssi) / (10 * N));
-//       return distance;
-//   }
+    float rawDistance = pow(10, (txPower - rssi) / (10 * N));
+    float referenceDistance = pow(10, (txPower - referenceRssi) / (10 * N));
+    float calibrationFactor = targetDistance / referenceDistance;
+    float calibratedDistance = rawDistance * calibrationFactor;
 
+    return calibratedDistance;
+  }
 };
 
 void setup() {
@@ -81,6 +111,13 @@ void setup() {
   Serial.println("\nESP32 BLE 클라이언트 시작");
   Serial.print("타겟 MAC 주소: ");
   Serial.println(TARGET_MAC_ADDRESS);
+  Serial.print("RSSI 샘플 수: ");
+  Serial.println(RSSI_SAMPLE_COUNT);
+
+  // RSSI 샘플 배열 초기화
+  for (int i = 0; i < RSSI_SAMPLE_COUNT; i++) {
+    rssiSamples[i] = 0;
+  }
 
   BLEDevice::init("");
   
@@ -99,6 +136,7 @@ void setup() {
 void loop() {
   deviceFound = false;
   Serial.println("타겟 기기 스캔 중...");
+  
   
   // 스캔 실행
   pBLEScan->start(1, false);
