@@ -19,6 +19,11 @@ bool connected = false;
 // ESP32 서버 MAC 주소 (스캔 결과에서 식별용)
 #define SERVER_MAC_ADDRESS "5c:01:3b:33:04:0a" // ESP32 서버의 MAC 주소로 변경
 
+// 최근 측정된 값 저장
+int lastRssi = 0;
+int lastTxPower = -59; // 기본값
+bool measurementComplete = false; // 측정 완료 여부를 나타내는 플래그
+
 void connectToPi() {
   if (piClient->isConnected()) {
     connected = true;
@@ -59,9 +64,11 @@ void sendToPi(int rssi, int txPower) {
   
   if (connected && dataChar && dataChar->canWrite()) {
     char buffer[20];
+    // RSSI와 TX Power만 전송
     snprintf(buffer, sizeof(buffer), "%d,%d", rssi, txPower);
     dataChar->writeValue(String(buffer));  // Arduino String 클래스 사용
     Serial.printf("Data sent to Raspberry Pi: %s\n", buffer);
+    Serial.println("Measurement data successfully sent to Raspberry Pi");
   } else {
     Serial.println("Cannot send data to Raspberry Pi");
     connected = false; // 다음에 다시 연결 시도
@@ -72,27 +79,32 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) {
     // 서버 MAC 주소로 식별
     if (advertisedDevice.getAddress().toString() == SERVER_MAC_ADDRESS) {
-      int rssi = advertisedDevice.getRSSI();
+      // ESP32 서버 발견
+      lastRssi = advertisedDevice.getRSSI();
       // TX Power가 없는 경우 기본값 -59 사용 (1m 거리에서의 일반적인 값)
-      int txPower = advertisedDevice.haveTXPower() ? advertisedDevice.getTXPower() : -59;
+      lastTxPower = advertisedDevice.haveTXPower() ? advertisedDevice.getTXPower() : -59;
       
-      Serial.printf("Server Found - MAC: %s, RSSI: %d dBm, TX Power: %d dBm\n", 
-                    advertisedDevice.getAddress().toString().c_str(), rssi, txPower);
+      Serial.printf("ESP32 Server Found - MAC: %s, RSSI: %d dBm, TX Power: %d dBm\n", 
+                    advertisedDevice.getAddress().toString().c_str(), lastRssi, lastTxPower);
       
-      // 라즈베리파이에 데이터 전송
-      sendToPi(rssi, txPower);
+      // 측정 완료 플래그 설정
+      Serial.println("Measurement completed successfully");
+      measurementComplete = true;
     }
   }
 };
 
-void scanDevices() {
-  Serial.println("Starting BLE scan...");
+void scanForServer() {
+  Serial.println("Scanning for ESP32 Server...");
+  // 스캔 시작 전에 측정 완료 플래그 초기화
+  measurementComplete = false;
+  
   BLEScan* scanner = BLEDevice::getScan();
   scanner->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
   scanner->setActiveScan(true);
   scanner->setInterval(100);
   scanner->setWindow(99);
-  scanner->start(5, false); // 5초 스캔, 계속 실행하지 않음
+  scanner->start(3, false); // 3초 스캔
   Serial.println("Scan completed");
 }
 
@@ -100,8 +112,9 @@ void setup() {
   Serial.begin(115200);
   while(!Serial) delay(10); // 시리얼 포트가 준비될 때까지 대기
   
-  Serial.println("BLE Client starting...");
-  BLEDevice::init("BLE-Client");
+  Serial.println("ESP32 BLE Client starting...");
+  // BLE 클라이언트 이름 설정
+  BLEDevice::init("ESP32-RSSI-Client");
   piClient = BLEDevice::createClient();
   
   // 초기 연결 시도
@@ -109,9 +122,18 @@ void setup() {
 }
 
 void loop() {
-  // 스캔 실행
-  scanDevices();
+  // ESP32 서버 스캔
+  scanForServer();
   
-  // 5초 대기 후 다시 스캔
-  delay(5000);
+  // 측정이 완료되었으면 라즈베리파이로 데이터 전송
+  if (measurementComplete) {
+    Serial.println("Measurement complete, sending data to Raspberry Pi...");
+    sendToPi(lastRssi, lastTxPower);
+    measurementComplete = false; // 플래그 초기화
+  } else {
+    Serial.println("No measurement data available, skipping transmission");
+  }
+  
+  // 2초 대기 후 다시 스캔
+  delay(2000);
 }
