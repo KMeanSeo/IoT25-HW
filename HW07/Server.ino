@@ -5,7 +5,7 @@
 
 // ========== 사용자 설정 ========== //
 #define DEVICE_NAME "ESP32-Server"
-#define TX_POWER ESP_PWR_LVL_P9  // +9dBm (최대 전력)
+#define TX_POWER ESP_PWR_LVL_N0  // 0dBm
 // ================================= //
 
 BLEAdvertising *pAdvertising;
@@ -18,7 +18,7 @@ void setup() {
   // BLE 초기화
   BLEDevice::init(DEVICE_NAME);
   
-  // TxPower 설정
+  // TxPower 설정 - 하드웨어 레벨에서만 설정
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, TX_POWER);
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, TX_POWER);
   
@@ -30,17 +30,7 @@ void setup() {
   advData.setFlags(0x06); // General discovery, BR/EDR not supported
   advData.setName(DEVICE_NAME);
   
-  // TxPower 값을 수동으로 광고 데이터에 포함
-  // 0x0A는 TX Power Level AD Type, 0x09는 +9dBm을 나타냄
-  uint8_t txPowerData[] = {0x02, 0x0A, 0x09};
-  
-  // Arduino String으로 변환
-  String txPowerString = "";
-  for(int i = 0; i < 3; i++) {
-    txPowerString += (char)txPowerData[i];
-  }
-  
-  advData.addData(txPowerString);
+  // TxPower 값을 수동으로 광고 데이터에 포함하는 부분 제거
   
   pAdvertising->setAdvertisementData(advData);
   
@@ -72,6 +62,7 @@ void loop() {
   
   delay(5000); // 5초마다 상태 출력
 }
+
 
 
 // #include <WiFi.h>
