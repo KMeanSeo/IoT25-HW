@@ -138,61 +138,85 @@
 //   delay(2000);
 // }
 
-
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 
 // ========== 사용자 설정 ========== //
-#define TARGET_DEVICE_NAME "ESP32-Server"  // 서버 이름
-#define FIXED_TX_POWER 9  // 고정된 TxPower 값 (+9dBm)
+#define TARGET_DEVICE_NAME "ESP32-Server"
 // ================================= //
 
 BLEScan* pBLEScan;
 
-// 광고 장치 콜백
-class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
+// ▼▼▼ 콜백 클래스 개선 ▼▼▼
+class EnhancedAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) {
-    // 서버 이름으로 장치 찾기
+    if (!advertisedDevice.haveRSSI()) {
+      Serial.println("⚠️ RSSI 정보 수신 실패");
+      return;
+    }
+
     if (advertisedDevice.getName() == TARGET_DEVICE_NAME) {
-      // RSSI 값 읽기
+      // 동적 TX Power 파싱
+      int8_t txPower = advertisedDevice.haveTXPower() 
+                      ? advertisedDevice.getTXPower() 
+                      : -127;  // 오류 코드
+
       int rssi = advertisedDevice.getRSSI();
       
-      // 시리얼 출력
-      Serial.println("========================");
-      Serial.print("서버 MAC: ");
+      // 데이터 출력
+      Serial.println("\n========================");
+      Serial.print("📱 서버 MAC: ");
       Serial.println(advertisedDevice.getAddress().toString().c_str());
-      Serial.print("RSSI: ");
+      Serial.print("📶 RSSI: ");
       Serial.print(rssi);
       Serial.println(" dBm");
-      Serial.print("TxPower: ");
-      Serial.print(FIXED_TX_POWER);
+      Serial.print("⚡ TxPower: ");
+      Serial.print(txPower);
       Serial.println(" dBm");
       Serial.println("========================");
+
+      // 거리 계산 (선택 사항)
+      float distance = calculateDistance(rssi, txPower);
+      Serial.print("📏 추정 거리: ");
+      Serial.print(distance);
+      Serial.println(" m");
     }
   }
+
+  // ▼▼▼ 거리 계산 함수 ▼▼▼
+  float calculateDistance(int rssi, int txPower) {
+    const float N = 2.0;  // 경로 손실 지수(실외 환경)
+    return pow(10, (txPower - rssi) / (10 * N));
+  }
 };
+// ▲▲▲ 개선된 콜백 클래스 ▲▲▲
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("\nESP32 BLE 클라이언트 시작");
-  Serial.println("서버 광고 스캔 모드");
+  Serial.println("\n🚀 ESP32 BLE 클라이언트 시작");
+  Serial.println("🔍 서버 검색 중...");
 
   BLEDevice::init("");
   
-  // 클라이언트의 TxPower도 서버와 동일하게 설정
+  // ▼▼▼ 전력 설정 최적화 ▼▼▼
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P9);
   
   pBLEScan = BLEDevice::getScan();
-  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setAdvertisedDeviceCallbacks(new EnhancedAdvertisedDeviceCallbacks());
+  
+  // ▼▼▼ 스캔 파라미터 최적화 ▼▼▼
   pBLEScan->setActiveScan(true);
-  pBLEScan->setInterval(100);
-  pBLEScan->setWindow(99);
+  pBLEScan->setInterval(67);    // 41.875ms (BLE 표준)
+  pBLEScan->setWindow(33);      // 20.625ms
+  pBLEScan->setMaxResults(1);   // 동기화 문제 방지
 }
 
 void loop() {
-  Serial.println("[상태] 서버 스캔 중...");
-  pBLEScan->start(1, false);  // 1초 동안 스캔 후 결과 처리
-  delay(500);  // 스캔 간격
+  BLEScanResults foundDevices = pBLEScan->start(1, false);  // 1초 스캔
+  Serial.print("✅ 스캔 완료. 발견된 장치: ");
+  Serial.println(foundDevices.getCount());
+  pBLEScan->clearResults();
+  delay(2000);  // 2초 대기 후 재스캔
 }
