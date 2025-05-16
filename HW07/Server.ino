@@ -61,10 +61,10 @@ class MyServerCallbacks: public BLEServerCallbacks {
     }
 };
 
-// LED 특성 콜백 클래스
 class LedCharacteristicCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
-      std::string value = pCharacteristic->getValue();
+      String value = pCharacteristic->getValue();  // String 타입으로 변경
+      
       if (value.length() > 0) {
         Serial.print("LED 명령 수신: ");
         for (int i = 0; i < value.length(); i++) {
@@ -74,7 +74,6 @@ class LedCharacteristicCallbacks: public BLECharacteristicCallbacks {
       }
     }
 };
-
 // TX Power 레벨에 해당하는 dBm 값 찾기
 int8_t getTxPowerDbm(esp_power_level_t level) {
   for (int i = 0; i < TX_POWER_MAP_SIZE; i++) {
