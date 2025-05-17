@@ -1,5 +1,8 @@
-// Server Code
-
+/*********
+  Rui Santos
+  Adapted by ChatGPT for DHT11
+  Original: https://RandomNerdTutorials.com/esp32-ble-server-client/
+*********/
 
 #include <BLEDevice.h>
 #include <BLEServer.h>
