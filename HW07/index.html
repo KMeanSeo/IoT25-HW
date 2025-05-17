@@ -283,7 +283,7 @@
         <button id="toggleAutoRgbButton">Auto RGB: ON</button>
       </div>
 
-      <!-- <div class="model-params">
+      <div class="model-params">
         <h3>Distance Estimation Model Parameters</h3>
         <div class="param-input">
           <label for="pathLossExponent">Path Loss Exponent (n):</label>
@@ -308,12 +308,6 @@
           />
         </div>
         <button id="updateModelButton">Update Model</button>
-      </div> -->
-
-      <div class="data-container" id="distanceContainer">
-        <h2>Estimated Distance</h2>
-        <p class="value" id="distanceValue">--</p>
-        <p>보정 공식: distance = 10<sup>(txPower - RSSI - 69.09)/31.73</sup></p>
       </div>
 
       <div class="chart-controls">
@@ -1134,15 +1128,10 @@
         }
       }
 
-      //   // Calculate distance using path loss model
-      //   function calculateDistance(rssi, txPower) {
-      //     // Path loss model: distance = 10^((txPower - RSSI)/(10*n))
-      //     const exponent = (txPower - rssi) / (10 * pathLossExponent);
-      //     return referenceDistance * Math.pow(10, exponent);
-      //   }
-
+      // Calculate distance using path loss model
       function calculateDistance(rssi, txPower) {
-        // 새로운 보정 공식 적용
+        // Path loss model: distance = 10^((txPower - RSSI)/(10*n))
+        //const exponent = (txPower - rssi) / (10 * pathLossExponent);
         return Math.pow(10, (txPower - rssi - 69.09) / 31.73);
       }
 
