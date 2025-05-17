@@ -1,236 +1,437 @@
 #include <BLEDevice.h>
 #include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
 #include <BLEServer.h>
-#include <BLEAdvertising.h>
-#include <BLE2902.h>
+#include <Arduino.h>
 
-// ========== 사용자 설정 ========== //
-#define DEVICE_NAME "ESP32-Server"
-#define TX_POWER ESP_PWR_LVL_P9  // 최대 전송 파워로 설정
-// ================================= //
+// Service and characteristic UUIDs
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
-// BLE 서비스 및 특성 UUID 정의
-#define SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"  // UART 서비스 UUID
-#define CHARACTERISTIC_UUID "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"  // RX 특성 UUID
-#define LED_SERVICE_UUID    "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define LED_CHAR_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+// Target MAC address to scan for (format: AA:BB:CC:DD:EE:FF)
+String targetMacAddress = "08:a6:f7:a1:46:fa"; // Replace with your target ESP32 MAC address
 
-// TX Power 레벨에 따른 dBm 값 매핑
-struct TxPowerMapping {
-  esp_power_level_t level;
-  int8_t dbm_value;
-  const char* description;
-};
+// Timing settings
+#define SCAN_DURATION 3       // Scan time (seconds) - shorter for more frequent scans
+#define SCAN_INTERVAL 100     // Scan interval (milliseconds)
+#define SCAN_WINDOW 99        // Scan window (milliseconds)
+#define SERVER_CHECK_INTERVAL 100 // Server task check interval (milliseconds)
+#define CONNECTION_TIMEOUT 10000  // Connection timeout (milliseconds)
 
-const TxPowerMapping TX_POWER_MAP[] = {
-  {ESP_PWR_LVL_N12, -12, "-12 dBm"},
-  {ESP_PWR_LVL_N9,  -9,  "-9 dBm"},
-  {ESP_PWR_LVL_N6,  -6,  "-6 dBm"},
-  {ESP_PWR_LVL_N3,  -3,  "-3 dBm"},
-  {ESP_PWR_LVL_N0,   0,  "0 dBm"},
-  {ESP_PWR_LVL_P3,   3,  "+3 dBm"},
-  {ESP_PWR_LVL_P6,   6,  "+6 dBm"},
-  {ESP_PWR_LVL_P9,   9,  "+9 dBm"}
-};
+// RGB LED pins
+#define RED_PIN    25  // GPIO pin for red LED
+#define GREEN_PIN  26  // GPIO pin for green LED
+#define BLUE_PIN   27  // GPIO pin for blue LED
 
-const int TX_POWER_MAP_SIZE = sizeof(TX_POWER_MAP) / sizeof(TxPowerMapping);
+// BLE scanner variables
+BLEScan* pBLEScan;
+bool deviceFound = false;
 
-// 글로벌 변수 선언
-BLEServer* pServer = NULL;
-BLECharacteristic* pCharacteristic = NULL;
-BLECharacteristic* pLedCharacteristic = NULL;
-BLEAdvertising *pAdvertising;
-uint32_t advertisingCount = 0;
+// BLE server variables
+BLEServer *pServer = NULL;
+BLECharacteristic *pCharacteristic = NULL;
 bool deviceConnected = false;
-bool oldDeviceConnected = false;
-uint32_t value = 0;
-uint32_t connectionCheckTimer = 0;
+unsigned long lastClientActivity = 0;  // Last client activity timestamp
 
-// 연결 상태 콜백 클래스
-class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
-      deviceConnected = true;
-      Serial.println("클라이언트가 연결되었습니다!");
-      // 연결 후에도 광고 계속 - 다른 클라이언트가 연결할 수 있게 함
-      BLEDevice::startAdvertising();
-    };
+// Device name variable
+String bleDeviceName = "ESP32_RSSI_Server";
 
-    void onDisconnect(BLEServer* pServer) {
-      deviceConnected = false;
-      Serial.println("클라이언트 연결이 끊어졌습니다!");
-    }
-};
+// Shared data variables
+int rssiValue = 0;
+int txPower = 0;
+bool newDataAvailable = false;
+bool dataSent = true;  // Initial value true to allow first scan
+SemaphoreHandle_t dataMutex; // Mutex for data access synchronization
 
-class LedCharacteristicCallbacks: public BLECharacteristicCallbacks {
-    void onWrite(BLECharacteristic *pCharacteristic) {
-      String value = pCharacteristic->getValue();  // String 타입으로 변경
-      
-      if (value.length() > 0) {
-        Serial.print("LED 명령 수신: ");
-        for (int i = 0; i < value.length(); i++) {
-          Serial.print(value[i]);
-        }
-        Serial.println();
-      }
-    }
-};
-// TX Power 레벨에 해당하는 dBm 값 찾기
-int8_t getTxPowerDbm(esp_power_level_t level) {
-  for (int i = 0; i < TX_POWER_MAP_SIZE; i++) {
-    if (TX_POWER_MAP[i].level == level) {
-      return TX_POWER_MAP[i].dbm_value;
-    }
-  }
-  return 0; // 기본값
+// RGB LED variables
+int currentRed = 0;
+int currentGreen = 0;
+int currentBlue = 0;
+
+// Flag to force scan after RGB control
+bool forceScan = false;
+
+// Function to update BLE device name
+void updateBLEDeviceName(const char* newName) {
+  // Set the new device name
+  esp_ble_gap_set_device_name(newName);
+  
+  // Stop advertising
+  BLEDevice::stopAdvertising();
+  
+  // Update advertising data
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);
+  pAdvertising->setMinPreferred(0x12);
+  
+  // Restart advertising
+  BLEDevice::startAdvertising();
+  
+  Serial.print("BLE device name changed to: ");
+  Serial.println(newName);
 }
 
-// TX Power 레벨에 해당하는 설명 찾기
-const char* getTxPowerDescription(esp_power_level_t level) {
-  for (int i = 0; i < TX_POWER_MAP_SIZE; i++) {
-    if (TX_POWER_MAP[i].level == level) {
-      return TX_POWER_MAP[i].description;
+void setColor(int red, int green, int blue) {
+  analogWrite(RED_PIN, 255 - red);
+  analogWrite(GREEN_PIN, 255 - green);
+  analogWrite(BLUE_PIN, 255 - blue);
+  
+  currentRed = red;
+  currentGreen = green;
+  currentBlue = blue;
+  
+  Serial.printf("RGB LED set to: R=%d, G=%d, B=%d\n", red, green, blue);
+}
+
+// Connection callback class
+class MyServerCallbacks: public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
+    lastClientActivity = millis();
+    Serial.println("Client connected!");
+    
+    // Force a scan when client connects
+    if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+      dataSent = true;  // Allow scan
+      forceScan = true; // Force immediate scan
+      xSemaphoreGive(dataMutex);
     }
   }
-  return "Unknown"; // 기본값
+
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+    Serial.println("Client disconnected");
+    
+    // Restart advertising after disconnection
+    BLEDevice::startAdvertising();
+    Serial.println("Advertising restarted");
+    
+    // Reset data transmission flag
+    if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+      dataSent = true;  // Allow next scan
+      xSemaphoreGive(dataMutex);
+    }
+  }
+};
+
+// Characteristic callback class to handle write events
+class MyCharacteristicCallbacks: public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    // 문자열로 직접 변환
+    String rxValue = "";
+    
+    // 데이터 길이가 0보다 크면 처리
+    if (pCharacteristic->getLength() > 0) {
+      // 바이트 배열을 String으로 변환
+      for (int i = 0; i < pCharacteristic->getLength(); i++) {
+        rxValue += (char)pCharacteristic->getData()[i];
+      }
+      
+      Serial.print("Received from client: ");
+      Serial.println(rxValue);
+      
+      // RGB 명령인지 확인
+      if (rxValue.startsWith("RGB:")) {
+        // RGB 값 파싱
+        String rgbPart = rxValue.substring(4); // "RGB:" 이후 부분
+        int commaPos1 = rgbPart.indexOf(',');
+        int commaPos2 = rgbPart.indexOf(',', commaPos1 + 1);
+        
+        if (commaPos1 > 0 && commaPos2 > 0) {
+          int r = rgbPart.substring(0, commaPos1).toInt();
+          int g = rgbPart.substring(commaPos1 + 1, commaPos2).toInt();
+          int b = rgbPart.substring(commaPos2 + 1).toInt();
+          
+          // LED 색상 설정
+          setColor(r, g, b);
+          
+          // 확인 응답 전송
+          String response = "RGB set to: " + String(r) + "," + String(g) + "," + String(b);
+          pCharacteristic->setValue(response.c_str());
+          pCharacteristic->notify();
+          
+          // 중요: RGB 설정 후 즉시 스캔 허용
+          if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+            dataSent = true;  // 다음 스캔 허용
+            forceScan = true; // 즉시 스캔 강제
+            xSemaphoreGive(dataMutex);
+          }
+        }
+      }
+    }
+  }
+};
+
+// Scan result callback class
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice advertisedDevice) {
+    // Get device MAC address
+    String deviceMacAddress = advertisedDevice.getAddress().toString().c_str();
+    
+    // Check if it matches target MAC address (case insensitive)
+    if (deviceMacAddress.equalsIgnoreCase(targetMacAddress)) {
+      deviceFound = true;
+      
+      // Acquire mutex
+      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+        // Store RSSI value
+        rssiValue = advertisedDevice.getRSSI();
+        
+        // Store TX Power value (if included in advertisement packet)
+        if (advertisedDevice.haveTXPower()) {
+          txPower = advertisedDevice.getTXPower();
+        }
+        
+        newDataAvailable = true;
+        dataSent = false;  // New data needs to be transmitted
+        xSemaphoreGive(dataMutex); // Release mutex
+      }
+      
+      Serial.println("----------------------------------------");
+      Serial.println("Target ESP32 found!");
+      Serial.print("MAC address: ");
+      Serial.println(deviceMacAddress);
+      Serial.print("RSSI: ");
+      Serial.print(rssiValue);
+      Serial.println(" dBm");
+      
+      if (advertisedDevice.haveTXPower()) {
+        Serial.print("TX Power: ");
+        Serial.print(txPower);
+        Serial.println(" dBm");
+      } else {
+        Serial.println("TX Power information not included in advertisement packet.");
+      }
+      Serial.println("----------------------------------------");
+    }
+  }
+};
+
+// BLE scan task
+void scanTask(void * parameter) {
+  Serial.println("Scan task started");
+  unsigned long lastScanTime = 0;
+  const unsigned long MIN_SCAN_INTERVAL = 500; // 최소 스캔 간격 (밀리초)
+  
+  while(1) {
+    bool shouldScan = false;
+    bool forceImmediateScan = false;
+    
+    // 현재 시간 가져오기
+    unsigned long currentTime = millis();
+    
+    // Acquire mutex
+    if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+      shouldScan = dataSent;  // Scan if previous data was transmitted
+      forceImmediateScan = forceScan;
+      
+      if (forceImmediateScan) {
+        forceScan = false; // 플래그 리셋
+      }
+      
+      xSemaphoreGive(dataMutex);
+    }
+    
+    // 스캔 조건 확인: 데이터 전송 완료 + (강제 스캔 또는 최소 스캔 간격 경과)
+    if (shouldScan && (forceImmediateScan || (currentTime - lastScanTime >= MIN_SCAN_INTERVAL))) {
+      Serial.println("Scanning...");
+      
+      // 스캔 시작 시간 기록
+      lastScanTime = currentTime;
+      
+      // Scan for a short time for better responsiveness
+      BLEScanResults* foundDevices = pBLEScan->start(SCAN_DURATION, false);
+      
+      int devicesFound = foundDevices->getCount();
+      Serial.print("Devices found: ");
+      Serial.println(devicesFound);
+      
+      if (!deviceFound) {
+        Serial.println("Target ESP32 not found.");
+      }
+      
+      pBLEScan->clearResults();
+      deviceFound = false;
+      
+      // 스캔 후 짧은 대기
+      vTaskDelay(50 / portTICK_PERIOD_MS);
+    } else {
+      // 스캔 조건이 충족되지 않으면 짧게 대기
+      vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+  }
+}
+
+// BLE server task
+void serverTask(void * parameter) {
+  Serial.println("Server task started");
+  
+  while(1) {
+    unsigned long currentTime = millis();
+    
+    // Check for connection timeout
+    if (deviceConnected && (currentTime - lastClientActivity > CONNECTION_TIMEOUT)) {
+      Serial.println("Client connection timeout, resetting connection...");
+      // Disconnect client to reset connection
+      pServer->disconnect(0);
+      deviceConnected = false;
+      
+      // Reset data transmission flag
+      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+        dataSent = true;  // Allow next scan
+        xSemaphoreGive(dataMutex);
+      }
+      
+      // Restart advertising
+      BLEDevice::startAdvertising();
+    }
+    
+    // Data transmission handling
+    if (deviceConnected) {
+      bool shouldSendData = false;
+      String dataToSend = "";
+      
+      // Acquire mutex
+      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+        if (newDataAvailable && !dataSent) {
+          // Format data
+          dataToSend = "RSSI:" + String(rssiValue);
+          if (txPower != 0) {
+            dataToSend += ",TXPower:" + String(txPower);
+          }
+          
+          // Add RGB information
+          dataToSend += ",RGB:" + String(currentRed) + "," + String(currentGreen) + "," + String(currentBlue);
+          
+          shouldSendData = true;
+          newDataAvailable = false;
+          dataSent = true;  // Mark as transmitted
+        }
+        xSemaphoreGive(dataMutex);
+      }
+      
+      // Send data outside mutex (BLE operations can take time)
+      if (shouldSendData) {
+        pCharacteristic->setValue(dataToSend.c_str());
+        pCharacteristic->notify();
+        Serial.println("Data sent to client: " + dataToSend);
+        lastClientActivity = millis();  // Update activity timestamp
+        
+        // 데이터 전송 후 짧은 대기 후 다음 스캔 허용
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+        
+        // 즉시 다음 스캔 강제
+        if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+          forceScan = true;
+          xSemaphoreGive(dataMutex);
+        }
+      }
+    } else {
+      // Reset data flags if no client is connected
+      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+        if (newDataAvailable && !dataSent) {
+          Serial.println("No client connection, discarding data and preparing for new scan");
+          newDataAvailable = false;
+          dataSent = true;  // Allow next scan
+        }
+        xSemaphoreGive(dataMutex);
+      }
+    }
+    
+    // Check at short intervals for better responsiveness
+    vTaskDelay(SERVER_CHECK_INTERVAL / portTICK_PERIOD_MS);
+  }
 }
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("ESP32 BLE 서버 시작 - 멀티 연결 지원 (개선된 버전)");
-
-  // BLE 초기화
-  BLEDevice::init(DEVICE_NAME);
+  Serial.println("ESP32 BLE Scanner and Server with RGB LED control starting...");
   
-  // TxPower 설정 - 하드웨어 레벨에서 설정
-  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, TX_POWER);
-  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, TX_POWER);
-  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, TX_POWER);
+  // Setup RGB LED pins as outputs
+  pinMode(RED_PIN, OUTPUT);
+  pinMode(GREEN_PIN, OUTPUT);
+  pinMode(BLUE_PIN, OUTPUT);
   
-  // 현재 TX Power의 dBm 값 가져오기
-  int8_t txPowerDbm = getTxPowerDbm(TX_POWER);
+  // Initial LED color (off)
+  setColor(0, 0, 0);
   
-  // BLE 서버 생성
+  // Create mutex
+  dataMutex = xSemaphoreCreateMutex();
+  
+  // BLE initialization
+  Serial.print("Setting BLE device name: ");
+  Serial.println(bleDeviceName);
+  BLEDevice::init(bleDeviceName.c_str());
+  
+  // Create BLE server
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
   
-  // UART 서비스 생성
-  BLEService *pUartService = pServer->createService(SERVICE_UUID);
+  // Create BLE service
+  BLEService *pService = pServer->createService(SERVICE_UUID);
   
-  // UART 특성 생성
-  pCharacteristic = pUartService->createCharacteristic(
+  // Create BLE characteristic
+  pCharacteristic = pService->createCharacteristic(
                       CHARACTERISTIC_UUID,
-                      BLECharacteristic::PROPERTY_READ   |
-                      BLECharacteristic::PROPERTY_WRITE  |
-                      BLECharacteristic::PROPERTY_NOTIFY |
-                      BLECharacteristic::PROPERTY_INDICATE
+                      BLECharacteristic::PROPERTY_READ |
+                      BLECharacteristic::PROPERTY_WRITE |
+                      BLECharacteristic::PROPERTY_NOTIFY
                     );
   
-  // UART 디스크립터 추가
-  pCharacteristic->addDescriptor(new BLE2902());
+  // Set characteristic callbacks to handle client writes
+  pCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
   
-  // LED 서비스 생성
-  BLEService *pLedService = pServer->createService(LED_SERVICE_UUID);
+  // Set initial value
+  pCharacteristic->setValue("ESP32 RSSI Scanner Ready");
   
-  // LED 특성 생성
-  pLedCharacteristic = pLedService->createCharacteristic(
-                      LED_CHAR_UUID,
-                      BLECharacteristic::PROPERTY_READ   |
-                      BLECharacteristic::PROPERTY_WRITE
-                    );
+  // Start service
+  pService->start();
   
-  // LED 특성 콜백 설정
-  pLedCharacteristic->setCallbacks(new LedCharacteristicCallbacks());
-  
-  // 서비스 시작
-  pUartService->start();
-  pLedService->start();
-  
-  // 광고 객체 생성
-  pAdvertising = BLEDevice::getAdvertising();
-  
-  // 광고 설정
+  // Start advertising
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->addServiceUUID(LED_SERVICE_UUID);
-  
-  // 광고 데이터 설정
-  BLEAdvertisementData advData;
-  advData.setFlags(0x06); // General discovery, BR/EDR not supported
-  advData.setName(DEVICE_NAME);
-  
-  // TxPower 값을 수동으로 광고 데이터에 포함
-  uint8_t txPowerData[] = {0x02, 0x0A, (uint8_t)txPowerDbm};
-  String txPowerString = "";
-  for(int i = 0; i < 3; i++) {
-    txPowerString += (char)txPowerData[i];
-  }
-  advData.addData(txPowerString);
-  
-  pAdvertising->setAdvertisementData(advData);
-  
-  // 스캔 응답 데이터 설정
-  BLEAdvertisementData scanResponse;
-  scanResponse.setName(DEVICE_NAME);
-  pAdvertising->setScanResponseData(scanResponse);
-  
-  // 광고 파라미터 설정 - 연결 안정성을 위해 간격 조정
-  pAdvertising->setMinInterval(0x20); // 0.625ms 단위, 약 20ms
-  pAdvertising->setMaxInterval(0x40); // 0.625ms 단위, 약 40ms
-  
-  // 광고 시작
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);  // Value for iPhone connection issues
+  pAdvertising->setMinPreferred(0x12);
   BLEDevice::startAdvertising();
+  Serial.println("BLE server started. Advertising...");
   
-  Serial.println("광고 시작됨 - 멀티 연결 지원");
-  Serial.print("장치 이름: ");
-  Serial.println(DEVICE_NAME);
-  Serial.print("TxPower: ");
-  Serial.print(getTxPowerDescription(TX_POWER));
-  Serial.print(" (");
-  Serial.print(txPowerDbm);
-  Serial.println(" dBm)");
-  Serial.println("클라이언트 연결 대기 중...");
+  // Create scan object
+  pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setActiveScan(true); // Active scan for more information
+  pBLEScan->setInterval(SCAN_INTERVAL);    // Scan interval (milliseconds)
+  pBLEScan->setWindow(SCAN_WINDOW);       // Scan window (milliseconds, must be <= interval)
+  
+  Serial.print("Target MAC address: ");
+  Serial.println(targetMacAddress);
+  
+  // Create tasks with higher stack size
+  xTaskCreatePinnedToCore(
+    scanTask,    // Task function
+    "BLE_Scan",  // Task name
+    8192,        // Stack size - 증가됨
+    NULL,        // Task parameter
+    2,           // Priority - 증가됨
+    NULL,        // Task handle
+    0            // Run on core 0
+  );
+  
+  xTaskCreatePinnedToCore(
+    serverTask,   // Task function
+    "BLE_Server", // Task name
+    8192,         // Stack size - 증가됨
+    NULL,         // Task parameter
+    1,            // Priority
+    NULL,         // Task handle
+    1             // Run on core 1
+  );
 }
 
 void loop() {
-  // 연결된 클라이언트가 있을 때 처리
-  if (deviceConnected) {
-    // 주기적으로 값 업데이트 (연결 유지를 위한 하트비트)
-    if (millis() - connectionCheckTimer > 2000) { // 2초마다 하트비트 전송
-      pCharacteristic->setValue((uint8_t*)&value, 4);
-      pCharacteristic->notify();
-      value++;
-      
-      Serial.print("연결된 클라이언트에 하트비트 전송: ");
-      Serial.println(value);
-      
-      connectionCheckTimer = millis();
-    }
-  }
-  
-  // 연결 해제 처리
-  if (!deviceConnected && oldDeviceConnected) {
-    delay(500); // BLE 스택이 준비할 시간 제공
-    pServer->startAdvertising(); // 광고 재시작
-    Serial.println("연결이 끊어졌습니다. 광고 재시작...");
-    advertisingCount = 0;
-    oldDeviceConnected = deviceConnected;
-  }
-  
-  // 새 연결 처리
-  if (deviceConnected && !oldDeviceConnected) {
-    Serial.println("새 클라이언트가 연결되었습니다!");
-    oldDeviceConnected = deviceConnected;
-    connectionCheckTimer = millis();
-  }
-  
-  // 광고 상태 표시 (연결이 없을 때만)
-  if (!deviceConnected) {
-    if (millis() - connectionCheckTimer > 5000) { // 5초마다 메시지 출력
-      Serial.print("광고 중... 연결 대기 중 (");
-      Serial.print(advertisingCount++);
-      Serial.println(")");
-      connectionCheckTimer = millis();
-    }
-  }
-  
-  delay(100); // CPU 사용량 감소
+  // Main loop is empty - all work is done in tasks
+  delay(1000);
 }
