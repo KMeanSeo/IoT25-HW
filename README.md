@@ -31,6 +31,9 @@ All codes and examples were tested and run on a Linux environment with Ubuntu 22
 - [HW06](./HW06/README.md)  
   _ESP32 Web Server_
 
+- [HW07](./HW07/README.md)  
+  _BLE-based Distance Estimation System_
+
 ---
 
 **Tip:** Click each folder name to see more details and specific instructions!
